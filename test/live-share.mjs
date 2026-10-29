@@ -1,0 +1,15 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import fs from "node:fs";
+const srcEnv = Object.fromEntries(fs.readFileSync(`/proc/${process.argv[2]}/environ`, "utf8").split("\0").filter(Boolean).map(l => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+const t = new StdioClientTransport({ command: "node", args: ["build/main.js"], env: srcEnv, stderr: "ignore" });
+const c = new Client({ name: "t", version: "1" }); await c.connect(t);
+await new Promise(r => setTimeout(r, 2500));
+const DRIVE = "b!ONB4fRN9gUiUlIAPbo5UJxWpiWMUjvhGixu8vLRFiuSmYrY3R_LLTogGs0Z-Vz8y", ITEM = "01WNSDW22J4GAMDLFB2NFYGMEM6TCX3VT3";
+const a = JSON.parse((await c.callTool({ name: "download-file", arguments: { driveId: DRIVE, itemId: ITEM } })).content[0].text);
+const r = await c.callTool({ name: "download-file", arguments: { shareUrl: a.webUrl } });
+const j = JSON.parse(r.content[0].text);
+console.log("shareUrl(webUrl):", j.error ? "ERROR " + j.error : { size: j.size, sameSha: j.sha256 === a.sha256 });
+const l = await c.callTool({ name: "sharepoint-site-files", arguments: { siteName: "bushlawgrp.sharepoint.com,7d78d038-7d13-4881-9494-800f6e8e5427,6389a915-8e14-46f8-8b1b-bcbcb4458ae4", operation: "get_content", filePath: "Funding Team/Funding SOP.docx", downloadEncoding: "base64" } });
+console.log("get_content(filePath):", JSON.parse(l.content[0].text).sha256 === a.sha256);
+await c.close();

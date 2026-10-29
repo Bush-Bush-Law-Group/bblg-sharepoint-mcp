@@ -8,7 +8,7 @@ import { logger } from "./logger.js";
 import { AuthManager, AuthMode } from "./auth.js";
 import { DefaultTenantId, DefaultRedirectUri, getDefaultGraphApiVersion, readPositiveInt, MAX_FETCH_ALL_ITEMS, MAX_FETCH_ALL_PAGES } from "./constants.js";
 import { rateLimiter, getClientIdentifier, PermissionValidator, SecurityConfigValidator } from "./security.js";
-import { microsoftGraphSchema, setAccessTokenSchema, getAuthStatusSchema, addGraphPermissionSchema, sharePointSiteFilesSchema, sharePointSiteDiscoverySchema, fileParserSchema, sharePointListsSchema } from "./fix-schemas.js";
+import { microsoftGraphSchema, setAccessTokenSchema, getAuthStatusSchema, addGraphPermissionSchema, sharePointSiteFilesSchema, sharePointSiteDiscoverySchema, fileParserSchema, sharePointListsSchema, downloadFileSchema } from "./fix-schemas.js";
 import { zeroTrustMonitor } from "./zero-trust-monitor.js";
 import { tokenRevocationManager } from "./token-revocation.js";
 import { emergencyControls } from "./emergency-controls.js";
@@ -16,6 +16,7 @@ import { policyGuard, graphMethodVerb, siteFilesVerb, listsVerb } from "./policy
 import { createGraphClient, assertRequestOrigin, AZURE_MANAGEMENT_ORIGIN } from "./graph-client.js";
 import { computeHealth } from "./health.js";
 import { replaceFileContent, decodeContent, describeContent } from "./file-content.js";
+import { downloadDriveItem, redactDownloadUrls, contentPathToItemPath } from "./file-download.js";
 import { confirmWrite, explainOutcome, renderPreview, parseConfirmMode, ConfirmationTokenStore } from "./confirmation.js";
 import { createRequire } from "module";
 import crypto from 'crypto';
@@ -166,7 +167,7 @@ function addSecurityHeaders(response) {
     return response;
 }
 server.tool("microsoft-graph", "A versatile tool to interact with Microsoft APIs including Microsoft Graph (Entra) and Azure Resource Management. IMPORTANT: For Graph API GET requests using advanced query parameters ($filter, $count, $search, $orderby), you are ADVISED to set 'consistencyLevel: \"eventual\"'.", microsoftGraphSchema, async (params) => {
-    const { apiType, path, method, apiVersion, subscriptionId, queryParams, body, graphApiVersion, fetchAll, consistencyLevel, confirm, confirmToken } = params;
+    const { apiType, path, method, apiVersion, subscriptionId, queryParams, body, graphApiVersion, fetchAll, consistencyLevel, confirm, confirmToken, saveToPath, overwrite, downloadEncoding } = params;
     // Local policy first, before any authentication check, so a shutdown is honoured
     // even when the credential is missing or broken.
     await policyGuard.enforce({ tool: 'microsoft-graph', verb: graphMethodVerb(method), resource: path });
@@ -288,18 +289,16 @@ server.tool("microsoft-graph", "A versatile tool to interact with Microsoft APIs
             switch (method.toLowerCase()) {
                 case 'get':
                     // Check if this is a file content request (ends with /content)
-                    if (path.endsWith('/content')) {
+                    if (contentPathToItemPath(path)) {
+                        // bblg fork 0.1.4: download the bytes instead of refusing. Graph's /content
+                        // answers with a redirect off graph.microsoft.com, which the origin-checked
+                        // client will not follow, so fetch via the item's download URL with a byte cap.
                         logger.info(`File content download requested for path: ${path}`);
-                        // For file content requests from microsoft-graph tool, 
-                        // return a message directing to use file-parser tool instead
-                        responseData = {
-                            message: "Direct file content download is not supported through microsoft-graph tool due to size limitations.",
-                            recommendation: "Please use the 'file-parser' tool to download and parse SharePoint documents.",
-                            note: "The file-parser tool handles large files internally and returns only the extracted text content.",
-                            path: path,
-                            size_limit_info: "Base64 encoded files can exceed response limits. File-parser tool processes files internally."
-                        };
-                        logger.info(`Directing to use file-parser tool for file content instead of direct download`);
+                        responseData = await throttledRetry(() => downloadDriveItem(graphClient, {
+                            itemPath: contentPathToItemPath(path),
+                            saveToPath, overwrite, encoding: downloadEncoding ?? 'base64'
+                        }));
+                        logger.audit('GRAPH_FILE_DOWNLOAD', { action: 'DOWNLOAD', targetResource: path, result: 'SUCCESS', metadata: { bytes: responseData.size, toDisk: !!saveToPath } });
                     }
                     else if (fetchAll) {
                         logger.info(`Fetching all pages for Graph path: ${path}`);
@@ -380,6 +379,8 @@ server.tool("microsoft-graph", "A versatile tool to interact with Microsoft APIs
                 default:
                     throw new Error(`Unsupported method: ${method}`);
             }
+            // Never hand out pre-authenticated download URLs from plain metadata calls (bblg fork 0.1.4).
+            redactDownloadUrls(responseData);
             // Audit logging for sensitive operations
             if (['post', 'put', 'patch', 'delete'].includes(method.toLowerCase())) {
                 logger.audit('GRAPH_API_OPERATION', {
@@ -1668,23 +1669,24 @@ async function handleSiteFiles(params, _extra, ctx) {
                 break;
             }
             case 'get_content': {
-                if (!fileId) {
-                    throw new Error("get_content operation requires fileId parameter");
+                // bblg fork 0.1.4: return the bytes (base64/text, size-capped) or save them to disk.
+                // The pre-authenticated download URL is no longer returned.
+                let itemPath;
+                if (fileId) {
+                    itemPath = `/sites/${site.id}/drive/items/${fileId}`;
                 }
-                // Get file metadata first
-                const metadata = await graphClient
-                    .api(`/sites/${site.id}/drive/items/${fileId}`)
-                    .select(DRIVE_ITEM_CONTENT_SELECT)
-                    .get();
-                result = {
-                    file: {
-                        id: metadata.id,
-                        name: metadata.name,
-                        size: formatFileSize(metadata.size || 0),
-                        downloadUrl: metadata['@microsoft.graph.downloadUrl']
-                    },
-                    note: "Use the downloadUrl to download the file content. The URL is temporary and expires after a short period."
-                };
+                else if (params.filePath) {
+                    itemPath = `/sites/${site.id}/drive/root:/${encodeDrivePath(sanitizePath(params.filePath))}:`;
+                }
+                else {
+                    throw new Error("get_content operation requires fileId or filePath parameter");
+                }
+                result = await throttledRetry(() => downloadDriveItem(graphClient, {
+                    itemPath,
+                    saveToPath: params.saveToPath,
+                    overwrite: params.overwrite,
+                    encoding: params.downloadEncoding ?? 'auto'
+                }));
                 break;
             }
             case 'create_folder': {
@@ -2557,6 +2559,57 @@ server.tool("sharepoint-site-discovery", "Discover and list SharePoint sites acc
     }
 });
 // File Parser Tool for documents (PDF, Word, Excel, etc.)
+// bblg fork 0.1.4: generic download for SharePoint and OneDrive drive items.
+server.tool("download-file", "Download a SharePoint or OneDrive file. Identify it by siteName + fileId/filePath, driveId + itemId/filePath, userId + filePath/itemId (a user's OneDrive), or shareUrl (a sharing link or file URL). Returns the content as base64 (or text) up to MAX_INLINE_DOWNLOAD_SIZE (default 10 MB), or writes it to saveToPath on the server's machine (up to MAX_FILE_DOWNLOAD_SIZE, default 100 MB). Never returns a download URL.", downloadFileSchema, async (params) => {
+    try {
+        const { siteName, driveId, userId, itemId, fileId, filePath, shareUrl, saveToPath, overwrite, encoding } = params;
+        await policyGuard.enforce({ tool: 'download-file', verb: 'read', resource: siteName ? `site:${siteName}` : (driveId ? `drive:${driveId}` : (userId ? `user:${userId}` : 'share')) });
+        if (!graphClient && authManager?.getAuthMode() === AuthMode.ClientProvidedToken) {
+            if (await authManager.tryInitializeFromCache()) {
+                graphClient = createGraphClient(authManager.getGraphAuthProvider());
+            }
+        }
+        if (!graphClient) {
+            throw new Error("Graph client not initialized. Check authentication configuration.");
+        }
+        const id = itemId || fileId;
+        const encPath = filePath ? encodeDrivePath(sanitizePath(filePath)) : null;
+        let base;
+        let itemPath;
+        if (shareUrl) {
+            if (!/^https:\/\//i.test(shareUrl)) throw new Error("shareUrl must be an https URL");
+            const token = 'u!' + Buffer.from(shareUrl, 'utf8').toString('base64').replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+            itemPath = `/shares/${token}/driveItem`;
+        }
+        else {
+            if (driveId) {
+                if (!/^[A-Za-z0-9!_-]{1,200}$/.test(driveId)) throw new Error("invalid driveId");
+                base = `/drives/${driveId}`;
+            }
+            else if (userId) {
+                if (!/^[^/?#\s\\]{1,200}$/.test(userId)) throw new Error("invalid userId");
+                base = `/users/${encodeURIComponent(userId)}/drive`;
+            }
+            else if (siteName) {
+                const site = await findSite(siteName, graphClient, siteCache);
+                base = `/sites/${site.id}/drive`;
+            }
+            else {
+                throw new Error("Provide shareUrl, or siteName/driveId/userId plus fileId/itemId or filePath");
+            }
+            if (id) itemPath = `${base}/items/${id}`;
+            else if (encPath) itemPath = `${base}/root:/${encPath}:`;
+            else throw new Error("Provide fileId/itemId or filePath");
+        }
+        const result = await throttledRetry(() => downloadDriveItem(graphClient, { itemPath, saveToPath, overwrite, encoding: encoding ?? 'auto' }));
+        logger.audit('SHAREPOINT_FILE_ACCESS', { action: 'DOWNLOAD', targetResource: result.id, result: 'SUCCESS', metadata: { bytes: result.size, toDisk: !!saveToPath } });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+    catch (error) {
+        logger.error("Error in download-file tool:", error);
+        return { content: [{ type: "text", text: JSON.stringify({ error: error.message }, null, 2) }], isError: true };
+    }
+});
 server.tool("file-parser", "Parse and extract text from SharePoint documents including PDF, Word, Excel, PowerPoint, and other formats. Perfect for document summarization and content analysis.", fileParserSchema, async (params) => {
     try {
         await policyGuard.enforce({ tool: 'file-parser', verb: 'read', resource: `site:${params.siteName}` });
@@ -2657,47 +2710,11 @@ server.tool("file-parser", "Parse and extract text from SharePoint documents inc
             logger.info(`Downloading file: ${filename} (${mimeType}, ${fileMetadata.size} bytes)`);
             // Use the microsoft-graph tool to download the file
             // This will handle the stream properly and return base64 encoded data
-            const downloadResponse = await throttledRetry(async () => {
-                // Make the API call using our updated stream handling logic
-                const request = graphClient.api(contentEndpoint);
-                // Check if we can use responseType (newer SDK versions)
-                if (typeof request.responseType === 'function') {
-                    // Use the new stream handling approach
-                    const response = await request.responseType(ResponseType.STREAM).get();
-                    // Convert stream to buffer, enforcing the byte budget while streaming. Metadata
-                    // size can be stale or absent, so the limit is applied to what actually arrives.
-                    const chunks = [];
-                    let received = 0;
-                    await new Promise((resolve, reject) => {
-                        response.on('data', (chunk) => {
-                            received += chunk.length;
-                            if (received > maxFileSize) {
-                                response.destroy();
-                                reject(new Error(`Download aborted: content exceeded the ${(maxFileSize / 1024 / 1024).toFixed(1)}MB limit while streaming.`));
-                                return;
-                            }
-                            chunks.push(chunk);
-                        });
-                        response.on('end', () => resolve(undefined));
-                        response.on('error', (error) => reject(error));
-                    });
-                    return Buffer.concat(chunks);
-                }
-                else {
-                    // Fallback to getStream for older SDK versions
-                    const result = await request.getStream();
-                    const chunks = [];
-                    let received = 0;
-                    for await (const chunk of result) {
-                        received += chunk.length;
-                        if (received > maxFileSize) {
-                            throw new Error(`Download aborted: content exceeded the ${(maxFileSize / 1024 / 1024).toFixed(1)}MB limit while streaming.`);
-                        }
-                        chunks.push(Buffer.from(chunk));
-                    }
-                    return Buffer.concat(chunks);
-                }
-            });
+            // bblg fork 0.1.4: fetch through the item's download URL. Graph's /content redirect leaves
+            // graph.microsoft.com and is refused by the origin-checked client, which broke file-parser.
+            const downloadResponse = (await throttledRetry(() => downloadDriveItem(graphClient, {
+                itemPath: metadataEndpoint, maxBytes: maxFileSize, raw: true
+            }))).bytes;
             const response = downloadResponse;
             if (!response || response.length === 0) {
                 throw new Error('File content is empty or could not be retrieved');

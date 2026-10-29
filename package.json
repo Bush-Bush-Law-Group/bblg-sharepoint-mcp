@@ -1,7 +1,7 @@
 {
   "name": "@iimransarwar/sharepoint-mcp",
-  "version": "0.1.3",
-  "description": "SharePoint MCP is a Model Context Protocol (MCP) server for Microsoft Graph with enhanced search, metadata extraction, pagination, and caching.",
+  "version": "0.1.4-bblg.1",
+  "description": "SharePoint MCP is a Model Context Protocol (MCP) server for Microsoft Graph with enhanced search, metadata extraction, pagination, and caching. (Bush & Bush Law Group fork: adds file download)",
   "license": "MIT",
   "author": "Imran Sarwar",
   "main": "build/main.js",
@@ -27,7 +27,10 @@
   },
   "files": [
     "build",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE",
+    "README.md",
+    "FORK_NOTES.md"
   ],
   "engines": {
     "node": ">=22.13.0"

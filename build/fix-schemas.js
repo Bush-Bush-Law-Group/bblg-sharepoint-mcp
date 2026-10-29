@@ -44,6 +44,9 @@ export const microsoftGraphSchema = {
     graphApiVersion: z.enum(["v1.0", "beta"]).optional().describe("Microsoft Graph API version to use"),
     fetchAll: z.boolean().optional().default(false).describe("Set to true to automatically fetch all pages for list results (e.g., users, groups). Default is false."),
     consistencyLevel: z.string().optional().describe("Graph API ConsistencyLevel header. ADVISED to be set to 'eventual' for Graph GET requests using advanced query parameters ($filter, $count, $search, $orderby)."),
+    saveToPath: z.string().max(4096).optional().describe("For GET .../content downloads: absolute local path on the server machine to write the file to (inside cwd, home, tmp or DOWNLOAD_SAVE_DIRS) instead of returning it inline"),
+    overwrite: z.boolean().optional().default(false).describe("With saveToPath: overwrite an existing local file"),
+    downloadEncoding: z.enum(["base64", "text", "auto"]).optional().describe("For GET .../content downloads: how to return the bytes inline (default base64; 'auto' returns text for text files)"),
 };
 // Set access token tool schema - export as shape
 export const setAccessTokenSchema = {
@@ -100,7 +103,7 @@ export const sharePointSiteFilesSchema = {
         "search", // Search for files with query
         "list", // List files in a folder
         "get_metadata", // Get detailed file information
-        "get_content", // Download file content
+        "get_content", // Download file content (base64/text inline up to MAX_INLINE_DOWNLOAD_SIZE, or saveToPath)
         "list_folders", // List folder structure
         "recent", // Get recently modified files
         "by_type", // Get files by type
@@ -157,7 +160,11 @@ export const sharePointSiteFilesSchema = {
         content: z.string().optional(),
         contentEncoding: z.enum(["text", "base64"]).optional()
     })).min(1).max(50).optional().describe("For the 'batch' operation: the write operations to preview together, confirm once, and run in order (same site, max 50)"),
-    continueOnError: z.boolean().optional().default(false).describe("Batch only: keep running after a failed entry instead of stopping")
+    continueOnError: z.boolean().optional().default(false).describe("Batch only: keep running after a failed entry instead of stopping"),
+    filePath: drivePath("get_content: path of the file within the site's default library (alternative to fileId), e.g. 'Projects/2024/report.pdf'"),
+    saveToPath: z.string().max(4096).optional().describe("get_content: absolute local path on the server machine to save the file to instead of returning it inline"),
+    overwrite: z.boolean().optional().default(false).describe("get_content with saveToPath: overwrite an existing local file"),
+    downloadEncoding: z.enum(["base64", "text", "auto"]).optional().default("auto").describe("get_content: return bytes as base64, as UTF-8 text, or auto (text for text files, otherwise base64)")
 };
 // SharePoint lists tool schema - export as shape
 export const sharePointListsSchema = {
@@ -188,4 +195,18 @@ export const sharePointListsSchema = {
         fields: z.record(z.string(), z.any()).optional()
     })).min(1).max(50).optional().describe("For the 'batch' operation: the list writes to preview together, confirm once, and run in order (same site, max 50)"),
     continueOnError: z.boolean().optional().default(false).describe("Batch only: keep running after a failed entry instead of stopping")
+};
+
+// bblg fork 0.1.4: download-file tool schema
+export const downloadFileSchema = {
+    siteName: z.string().optional().describe("SharePoint site name, URL or ID (uses the site's default document library)"),
+    driveId: z.string().regex(/^[A-Za-z0-9!_-]{1,200}$/).optional().describe("Drive ID (any SharePoint library or OneDrive)"),
+    userId: z.string().max(200).optional().describe("User ID or UPN, to read from that user's OneDrive"),
+    itemId: z.string().regex(/^[A-Za-z0-9!_-]{1,200}$/).optional().describe("Drive item ID"),
+    fileId: z.string().regex(/^[A-Za-z0-9!_-]{1,200}$/).optional().describe("Alias of itemId"),
+    filePath: drivePath("Path of the file within the drive root, e.g. 'Shared Documents/x.pdf' style paths relative to the library root"),
+    shareUrl: z.string().max(2048).optional().describe("A SharePoint/OneDrive sharing link or file URL"),
+    saveToPath: z.string().max(4096).optional().describe("Absolute local path on the server machine to write the file to (inside cwd, home, tmp or DOWNLOAD_SAVE_DIRS) instead of returning it inline"),
+    overwrite: z.boolean().optional().default(false).describe("With saveToPath: overwrite an existing local file"),
+    encoding: z.enum(["base64", "text", "auto"]).optional().default("auto").describe("Inline return format: base64, UTF-8 text, or auto (text for text files)")
 };
