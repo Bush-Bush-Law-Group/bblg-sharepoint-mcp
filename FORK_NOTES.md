@@ -2,6 +2,35 @@
 
 Upstream publishes only the compiled build (no repository field on npm), so this fork patches build/.
 
+
+## BBLG firm setup: per-user sign-in only (Nov 18, 2026)
+
+The firm's connector now signs in **as each user**, so it can only do what that person's own Microsoft 365 account is allowed to do. There is **no client secret** and no app-only (firm-wide) access. Firm-wide search is handled separately by the M365 Tenant Search connector.
+
+Entra app "Grok Bot SharePoint MCP" (client ID `c69cdf91-8174-4afe-bf21-b3e827f65baa`):
+- Client secrets: none (all deleted). Application permissions: none (removed with their admin consent).
+- Delegated permissions (tenant-wide consent): User.Read, openid, profile, email, Files.ReadWrite.All, Sites.ReadWrite.All, Sites.Manage.All.
+- Authentication: Mobile and desktop redirect URIs `http://localhost:3000` and `http://localhost`; **Allow public client flows = Yes** (needed for device-code sign-in on headless bot computers).
+
+### Setup for any team member
+
+1. Add the MCP server using [`bblg-mcp-config.json`](bblg-mcp-config.json) (stdio). Do **not** add `CLIENT_SECRET`, `USE_CLIENT_TOKEN` or `USE_CERTIFICATE`; if an old setup has a secret, remove it.
+2. Run the **`login`** tool once and sign in with **your own** Microsoft account.
+   - Browser available: a browser window opens.
+   - Headless (e.g. a Grok Bot computer): call `login` with `useDeviceCode: true`, then read the code from `get-auth-status` (`pendingAuth`) and enter it at https://microsoft.com/devicelogin. Only enter codes your own bot gave you.
+3. Check `get-auth-status`: `authMode` should be `interactive` and show your account.
+4. The session is saved in OS-protected storage and refreshes silently (about 90 days of inactivity).
+
+On a Grok Bot computer, if the sign-in does not persist across restarts, add this to `env`:
+`"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/xdg-runtime-box/bus"` (Secret Service keychain).
+
+If your connector was installed as a plugin with built-in env (e.g. the old secret-based plugin), uninstall it and add this config as a custom MCP server instead; editing the dashboard env does not override a plugin's built-in env. Restart the server process after changing env.
+
+Troubleshooting:
+- `invalid_client` on device-code sign-in: "Allow public client flows" is off on the app; ask IT.
+- `Not signed in. Run the 'login' tool`: run `login` once as above.
+- Access denied on a site/file: your own account lacks permission; ask the site owner.
+
 ## Fixes
 1. Downloads work. Graph answers GET .../content with a 302 to a pre-authenticated SharePoint URL;
    upstream's Graph client (OriginCheckMiddleware) refuses any non-graph.microsoft.com hop, so
