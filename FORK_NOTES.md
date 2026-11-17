@@ -15,7 +15,7 @@ Entra app "Grok Bot SharePoint MCP" (client ID `c69cdf91-8174-4afe-bf21-b3e827f6
 ### Setup for any team member
 
 1. Add the MCP server using [`bblg-mcp-config.json`](bblg-mcp-config.json) (stdio). Do **not** add `CLIENT_SECRET`, `USE_CLIENT_TOKEN` or `USE_CERTIFICATE`; if an old setup has a secret, remove it.
-   Keep `"CONFIRM_WRITES": "token"` in `env`. Grok Bot and most chat clients can't show the connector's own confirmation form, so with the default (`elicit`) every write is refused. With `token`, each write first returns a preview and runs only when re-sent with `confirm: true` and the single-use token. You get both read and write access, limited to what your own account can do in SharePoint/OneDrive.
+   Keep `"CONFIRM_WRITES": "false"` in `env`. Grok Bot advertises the MCP confirmation form but auto-declines it, so with `elicit` (default) or `token` every write comes back "Declined by the user". Grok Bot's own Auto-review still checks each call. You get full read and write access, limited to what your own account can do in SharePoint/OneDrive.
 2. Run the **`login`** tool once and sign in with **your own** Microsoft account.
    - Browser available: a browser window opens.
    - Headless (e.g. a Grok Bot computer): call `login` with `useDeviceCode: true`, then read the code from `get-auth-status` (`pendingAuth`) and enter it at https://microsoft.com/devicelogin. Only enter codes your own bot gave you.
@@ -29,7 +29,7 @@ If your connector was installed as a plugin with built-in env (e.g. the old secr
 
 Troubleshooting:
 - `invalid_client` on device-code sign-in: "Allow public client flows" is off on the app; ask IT.
-- Every write refused / "client does not support MCP elicitation": add `"CONFIRM_WRITES": "token"` to `env` and restart the connector.
+- Every write "Declined by the user" or refused for elicitation: set `"CONFIRM_WRITES": "false"` in `env` and restart the connector.
 - `Not signed in. Run the 'login' tool`: run `login` once as above.
 - Access denied on a site/file: your own account lacks permission; ask the site owner.
 
